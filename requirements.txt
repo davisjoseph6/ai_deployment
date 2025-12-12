@@ -1,11 +1,38 @@
+# ----------------------------
+# Backend (Stage 1)
+# ----------------------------
+fastapi
+uvicorn[standard]
+python-multipart
+requests
+
+# ----------------------------
+# Core scientific stack
+# ----------------------------
+numpy
+pillow
+matplotlib
+opencv-python-headless
+
+# ----------------------------
+# PyTorch stack
+# ----------------------------
 torch
 torchvision
 timm
-opencv-python
+
+# ----------------------------
+# YOLO segmentation
+# ----------------------------
+ultralytics
+
+# ----------------------------
+# MobileSAM
+# ----------------------------
 git+https://github.com/dhkim2810/MobileSAM.git
-matplotlib
-uvicorn[standard]
-fastapi
-python-multipart
+
+# ----------------------------
+# Testing
+# ----------------------------
 pytest>=7.4.4
-requests>=2.26.0
+

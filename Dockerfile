@@ -1,26 +1,27 @@
-# Use an official Python runtime as a parent image
-FROM python:3.10.12-slim
+FROM python:3.10-slim
 
-# Set the working directory in the container
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1   
+
 WORKDIR /usr/src/app
 
-# Install system dependencies
-RUN apt-get update && \
-    apt-get install -y git libgl1-mesa-glx libglib2.0-0 && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    libgl1 \
+    libglib2.0-0 \
+    fonts-dejavu-core \
+ && rm -rf /var/lib/apt/lists/*
 
-# Copy the current directory contents into the container at /usr/src/app
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
 COPY . .
 
-# Install any needed packages specified in requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+# If you renamed folder:
+ENV AI_ARTIFACTS_DIR=/usr/src/app/ai_model_artifacts
+# If you didn't rename, you can override at runtime.
 
-# Make port 8000 available to the world outside this container
 EXPOSE 8000
+CMD ["uvicorn", "app.api:app", "--host", "0.0.0.0", "--port", "8000"]
 
-# Define environment variable
-ENV NAME World
-
-# Run app.py when the container launches
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]

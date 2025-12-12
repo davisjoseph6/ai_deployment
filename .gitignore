@@ -1,3 +1,1 @@
-venv
-generated
-__pycache__
+.venv/
