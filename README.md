@@ -69,5 +69,6 @@ On an Azure GPU node (sm_70+ with DEVICE=cuda):
 
 ```bash
 source .venv/bin/activate
+export API_TIMEOUT=600
 python scripts/test_endpoints.py ./test_images/board_01.jpg
 ```
