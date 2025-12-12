@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>PCB Void Analysis – Local UI</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      margin: 0;
+      padding: 1rem 2rem 3rem;
+      background: #f5f5f5;
+    }
+    h1 {
+      font-size: 1.6rem;
+      margin-bottom: 0.5rem;
+    }
+    h2 {
+      margin-top: 1.5rem;
+      font-size: 1.2rem;
+    }
+    .panel {
+      background: #fff;
+      border-radius: 8px;
+      padding: 1rem;
+      margin-top: 1rem;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+    }
+    #mainCanvas {
+      border: 1px solid #ccc;
+      max-width: 100%;
+      margin-top: 0.5rem;
+      cursor: crosshair;
+    }
+    .row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1.5rem;
+    }
+    .col {
+      flex: 1 1 300px;
+      min-width: 0;
+    }
+    pre {
+      background: #111;
+      color: #eee;
+      padding: 0.5rem;
+      border-radius: 4px;
+      max-height: 250px;
+      overflow: auto;
+      font-size: 0.8rem;
+    }
+    button {
+      margin-right: 0.5rem;
+      margin-top: 0.5rem;
+      padding: 0.4rem 0.8rem;
+      border-radius: 4px;
+      border: 1px solid #888;
+      background: #fff;
+      cursor: pointer;
+    }
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    #samOverlay, #samOverlayRoi {
+      max-width: 100%;
+      border: 1px solid #ccc;
+      margin-top: 0.5rem;
+    }
+    .badge {
+      display: inline-block;
+      background: #eee;
+      padding: 0.1rem 0.4rem;
+      border-radius: 4px;
+      font-size: 0.7rem;
+      margin-left: 0.3rem;
+    }
+    .roi-info {
+      font-size: 0.85rem;
+      margin-top: 0.3rem;
+    }
+    label {
+      font-size: 0.9rem;
+    }
+    select, textarea {
+      font-family: inherit;
+      font-size: 0.9rem;
+    }
+    textarea {
+      width: 100%;
+      min-height: 60px;
+    }
+  </style>
+</head>
+<body>
+  <h1>PCB Void Analysis – Local UI</h1>
+  <div>Backend: <code>/yolo/predict</code>, <code>/sam/segment-overlay-with-stats</code>, <code>/analyze/void-rate</code>, <code>/healthz</code></div>
+
+  <!-- Upload & canvas -->
+  <div class="panel">
+    <h2>1. Upload image & view</h2>
+    <input type="file" id="fileInput" accept="image/*" />
+    <div class="roi-info" id="imgInfo"></div>
+    <canvas id="mainCanvas" width="640" height="640"></canvas>
+    <div class="roi-info" id="roiInfo"></div>
+  </div>
+
+  <!-- Inference controls -->
+  <div class="panel">
+    <h2>2. Run inference on FULL image</h2>
+    <button id="btnRunYolo" disabled>Run YOLO /yolo/predict</button>
+    <button id="btnRunSam" disabled>Run SAM /sam/segment-overlay-with-stats</button>
+    <button id="btnRunVoid" disabled>Run Void-rate /analyze/void-rate</button>
+  </div>
+
+  <!-- Results -->
+  <div class="panel">
+    <h2>3. Results (full image)</h2>
+    <div class="row">
+      <div class="col">
+        <h3>YOLO detections <span class="badge" id="yoloCountBadge">0</span></h3>
+        <pre id="yoloJson"></pre>
+      </div>
+      <div class="col">
+        <h3>SAM overlay (full image)</h3>
+        <img id="samOverlay" alt="SAM overlay" />
+        <h4>Segments</h4>
+        <pre id="samJson"></pre>
+      </div>
+      <div class="col">
+        <h3>Void-rate</h3>
+        <pre id="voidJson"></pre>
+      </div>
+    </div>
+  </div>
+
+  <!-- ROI + active learning -->
+  <div class="panel">
+    <h2>4. Region of Interest selection & active learning</h2>
+    <p>
+      Draw a rectangular ROI directly on the canvas (click & drag).
+      Then you can re-run YOLO & SAM on just that region, and optionally send it as feedback.
+    </p>
+    <button id="btnClearRoi">Clear ROI</button>
+    <button id="btnRunYoloRoi" disabled>Run YOLO on ROI</button>
+    <button id="btnRunSamRoi" disabled>Run SAM on ROI</button>
+
+    <div class="row" style="margin-top: 1rem;">
+      <div class="col">
+        <h3>ROI YOLO detections</h3>
+        <pre id="yoloJsonRoi"></pre>
+      </div>
+      <div class="col">
+        <h3>ROI SAM overlay</h3>
+        <img id="samOverlayRoi" alt="SAM ROI overlay" />
+        <h4>ROI segments</h4>
+        <pre id="samJsonRoi"></pre>
+      </div>
+      <div class="col">
+        <h3>Send ROI as feedback</h3>
+        <label for="feedbackLabel">Label for this ROI:</label><br />
+        <select id="feedbackLabel">
+          <option value="bubble">bubble (void)</option>
+          <option value="chip">chip</option>
+          <option value="background">background</option>
+          <option value="other">other</option>
+        </select>
+        <br /><br />
+        <label for="feedbackNotes">Optional notes:</label><br />
+        <textarea id="feedbackNotes" placeholder="e.g. missed bubble near top-right of chip"></textarea>
+        <br />
+        <button id="btnSendFeedback" disabled>Send ROI feedback (/feedback/roi-example)</button>
+        <div class="roi-info" id="feedbackStatus"></div>
+      </div>
+    </div>
+  </div>
+
+<script>
+  const fileInput = document.getElementById('fileInput');
+  const imgInfo = document.getElementById('imgInfo');
+  const roiInfo = document.getElementById('roiInfo');
+  const canvas = document.getElementById('mainCanvas');
+  const ctx = canvas.getContext('2d');
+
+  const yoloJsonEl = document.getElementById('yoloJson');
+  const yoloCountBadge = document.getElementById('yoloCountBadge');
+  const samJsonEl = document.getElementById('samJson');
+  const samOverlayImg = document.getElementById('samOverlay');
+  const voidJsonEl = document.getElementById('voidJson');
+
+  const yoloJsonRoiEl = document.getElementById('yoloJsonRoi');
+  const samJsonRoiEl = document.getElementById('samJsonRoi');
+  const samOverlayRoiImg = document.getElementById('samOverlayRoi');
+
+  const btnRunYolo = document.getElementById('btnRunYolo');
+  const btnRunSam = document.getElementById('btnRunSam');
+  const btnRunVoid = document.getElementById('btnRunVoid');
+
+  const btnClearRoi = document.getElementById('btnClearRoi');
+  const btnRunYoloRoi = document.getElementById('btnRunYoloRoi');
+  const btnRunSamRoi = document.getElementById('btnRunSamRoi');
+  const btnSendFeedback = document.getElementById('btnSendFeedback');
+
+  const feedbackLabel = document.getElementById('feedbackLabel');
+  const feedbackNotes = document.getElementById('feedbackNotes');
+  const feedbackStatus = document.getElementById('feedbackStatus');
+
+  let currentFile = null;
+  const originalImage = new Image();
+  let imageLoaded = false;
+
+  let yoloDetections = [];
+  let yoloBaseShape = null; // [H, W] from backend
+
+  // ROI state in canvas coords
+  let roi = null;
+  let isDrawingRoi = false;
+  let roiStart = null;
+
+  // ---- Canvas drawing helpers ----
+  function drawScene() {
+    if (!imageLoaded) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      return;
+    }
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(originalImage, 0, 0, canvas.width, canvas.height);
+
+    // Draw YOLO boxes (full image)
+    if (yoloDetections && yoloDetections.length && yoloBaseShape) {
+      const [baseH, baseW] = yoloBaseShape;
+      const sx = canvas.width / baseW;
+      const sy = canvas.height / baseH;
+      ctx.lineWidth = 2;
+      ctx.font = '11px system-ui';
+
+      yoloDetections.forEach(det => {
+        const [x1, y1, x2, y2] = det.bbox_xyxy;
+        const cx = x1 * sx;
+        const cy = y1 * sy;
+        const cw = (x2 - x1) * sx;
+        const ch = (y2 - y1) * sy;
+        ctx.strokeRect(cx, cy, cw, ch);
+        const label = det.category || String(det.class_id);
+        const text = `${label} ${(det.score || 0).toFixed(2)}`;
+        const tw = ctx.measureText(text).width + 4;
+        const th = 12;
+        ctx.fillRect(cx, cy - th, tw, th);
+        ctx.fillStyle = '#fff';
+        ctx.fillText(text, cx + 2, cy - 2);
+        ctx.fillStyle = '#000';
+      });
+    }
+
+    // Draw ROI rect if present
+    if (roi) {
+      ctx.save();
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 4]);
+      ctx.strokeStyle = '#ff0000';
+      ctx.strokeRect(roi.x, roi.y, roi.w, roi.h);
+      ctx.restore();
+    }
+  }
+
+  // ---- File load ----
+  fileInput.addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    currentFile = file;
+    const url = URL.createObjectURL(file);
+    originalImage.onload = () => {
+      imageLoaded = true;
+      // Fit into canvas up to 800x800
+      const maxW = 800;
+      const maxH = 800;
+      let w = originalImage.naturalWidth;
+      let h = originalImage.naturalHeight;
+      const r = Math.min(maxW / w, maxH / h, 1);
+      w = Math.round(w * r);
+      h = Math.round(h * r);
+      canvas.width = w;
+      canvas.height = h;
+      imgInfo.textContent = `Original: ${originalImage.naturalWidth}×${originalImage.naturalHeight}, displayed: ${w}×${h}`;
+      yoloDetections = [];
+      yoloBaseShape = null;
+      roi = null;
+      roiInfo.textContent = '';
+      drawScene();
+      btnRunYolo.disabled = false;
+      btnRunSam.disabled = false;
+      btnRunVoid.disabled = false;
+      btnRunYoloRoi.disabled = true;
+      btnRunSamRoi.disabled = true;
+      btnSendFeedback.disabled = true;
+    };
+    originalImage.src = url;
+  });
+
+  // ---- ROI selection on canvas ----
+  canvas.addEventListener('mousedown', (e) => {
+    if (!imageLoaded) return;
+    isDrawingRoi = true;
+    const rect = canvas.getBoundingClientRect();
+    roiStart = {
+      x: e.clientX - rect.left,
+      y: e.clientY - rect.top,
+    };
+    roi = { x: roiStart.x, y: roiStart.y, w: 0, h: 0 };
+    drawScene();
+  });
+
+  canvas.addEventListener('mousemove', (e) => {
+    if (!isDrawingRoi || !roiStart) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    roi = {
+      x: Math.min(roiStart.x, x),
+      y: Math.min(roiStart.y, y),
+      w: Math.abs(x - roiStart.x),
+      h: Math.abs(y - roiStart.y),
+    };
+    drawScene();
+  });
+
+  canvas.addEventListener('mouseup', () => {
+    if (!isDrawingRoi) return;
+    isDrawingRoi = false;
+    roiStart = null;
+    if (roi && roi.w > 5 && roi.h > 5) {
+      roiInfo.textContent = `ROI (canvas coords): x=${roi.x.toFixed(0)}, y=${roi.y.toFixed(0)}, w=${roi.w.toFixed(0)}, h=${roi.h.toFixed(0)}`;
+      btnRunYoloRoi.disabled = false;
+      btnRunSamRoi.disabled = false;
+      btnSendFeedback.disabled = false;
+    } else {
+      roi = null;
+      roiInfo.textContent = 'ROI too small, ignored.';
+      btnRunYoloRoi.disabled = true;
+      btnRunSamRoi.disabled = true;
+      btnSendFeedback.disabled = true;
+    }
+    drawScene();
+  });
+
+  btnClearRoi.addEventListener('click', () => {
+    roi = null;
+    roiStart = null;
+    isDrawingRoi = false;
+    roiInfo.textContent = '';
+    btnRunYoloRoi.disabled = true;
+    btnRunSamRoi.disabled = true;
+    btnSendFeedback.disabled = true;
+    drawScene();
+  });
+
+  // ---- Helpers: ROI -> Blob ----
+  function getRoiSourceRectInOriginal() {
+    if (!roi || !imageLoaded) return null;
+    const sx = originalImage.naturalWidth / canvas.width;
+    const sy = originalImage.naturalHeight / canvas.height;
+    const srcX = Math.max(0, Math.round(roi.x * sx));
+    const srcY = Math.max(0, Math.round(roi.y * sy));
+    const srcW = Math.max(1, Math.round(roi.w * sx));
+    const srcH = Math.max(1, Math.round(roi.h * sy));
+    return { srcX, srcY, srcW, srcH };
+  }
+
+  function getRoiBlob() {
+    if (!roi || !imageLoaded) return Promise.resolve(null);
+    const r = getRoiSourceRectInOriginal();
+    if (!r) return Promise.resolve(null);
+    const { srcX, srcY, srcW, srcH } = r;
+    const off = document.createElement('canvas');
+    off.width = srcW;
+    off.height = srcH;
+    const octx = off.getContext('2d');
+    octx.drawImage(originalImage, srcX, srcY, srcW, srcH, 0, 0, srcW, srcH);
+    return new Promise((resolve) => {
+      off.toBlob((blob) => resolve(blob), 'image/png');
+    });
+  }
+
+  // ---- Backend helpers ----
+  async function postFile(endpoint, fileOrBlob, filename) {
+    const fd = new FormData();
+    fd.append('file', fileOrBlob, filename || 'image.png');
+    const resp = await fetch(endpoint, { method: 'POST', body: fd });
+    if (!resp.ok) {
+      throw new Error(`${endpoint} failed: ${resp.status}`);
+    }
+    return resp.json();
+  }
+
+  // ---- Full-image calls ----
+  btnRunYolo.addEventListener('click', async () => {
+    if (!currentFile) return;
+    yoloJsonEl.textContent = 'Running YOLO...';
+    try {
+      const data = await postFile('/yolo/predict', currentFile, currentFile.name);
+      yoloJsonEl.textContent = JSON.stringify(data, null, 2);
+      yoloDetections = data.detections || [];
+      yoloBaseShape = data.image_shape || null;
+      yoloCountBadge.textContent = yoloDetections.length;
+      drawScene();
+    } catch (err) {
+      yoloJsonEl.textContent = String(err);
+    }
+  });
+
+  btnRunSam.addEventListener('click', async () => {
+    if (!currentFile) return;
+    samJsonEl.textContent = 'Running SAM segmentation...';
+    samOverlayImg.src = '';
+    try {
+      const data = await postFile('/sam/segment-overlay-with-stats', currentFile, currentFile.name);
+      samJsonEl.textContent = JSON.stringify(data.segments || data, null, 2);
+      if (data.image_png_base64) {
+        samOverlayImg.src = 'data:image/png;base64,' + data.image_png_base64;
+      }
+    } catch (err) {
+      samJsonEl.textContent = String(err);
+    }
+  });
+
+  btnRunVoid.addEventListener('click', async () => {
+    if (!currentFile) return;
+    voidJsonEl.textContent = 'Running void-rate analysis...';
+    try {
+      const data = await postFile('/analyze/void-rate', currentFile, currentFile.name);
+      voidJsonEl.textContent = JSON.stringify(data, null, 2);
+    } catch (err) {
+      voidJsonEl.textContent = String(err);
+    }
+  });
+
+  // ---- ROI calls (reuse existing endpoints with cropped patch) ----
+  btnRunYoloRoi.addEventListener('click', async () => {
+    if (!currentFile || !roi) return;
+    yoloJsonRoiEl.textContent = 'Running YOLO on ROI...';
+    try {
+      const blob = await getRoiBlob();
+      if (!blob) throw new Error('No ROI blob');
+      const data = await postFile('/yolo/predict', blob, currentFile.name.replace(/\.(\w+)$/, '_roi.$1'));
+      yoloJsonRoiEl.textContent = JSON.stringify(data, null, 2);
+    } catch (err) {
+      yoloJsonRoiEl.textContent = String(err);
+    }
+  });
+
+  btnRunSamRoi.addEventListener('click', async () => {
+    if (!currentFile || !roi) return;
+    samJsonRoiEl.textContent = 'Running SAM on ROI...';
+    samOverlayRoiImg.src = '';
+    try {
+      const blob = await getRoiBlob();
+      if (!blob) throw new Error('No ROI blob');
+      const data = await postFile('/sam/segment-overlay-with-stats', blob, currentFile.name.replace(/\.(\w+)$/, '_roi.$1'));
+      samJsonRoiEl.textContent = JSON.stringify(data.segments || data, null, 2);
+      if (data.image_png_base64) {
+        samOverlayRoiImg.src = 'data:image/png;base64,' + data.image_png_base64;
+      }
+    } catch (err) {
+      samJsonRoiEl.textContent = String(err);
+    }
+  });
+
+  // ---- Feedback (active learning) ----
+  btnSendFeedback.addEventListener('click', async () => {
+    if (!currentFile || !roi) return;
+    feedbackStatus.textContent = 'Sending feedback...';
+    try {
+      const blob = await getRoiBlob();
+      if (!blob) throw new Error('No ROI blob');
+      const fd = new FormData();
+      fd.append('file', blob, currentFile.name.replace(/\.(\w+)$/, '_roi.$1'));
+      fd.append('label', feedbackLabel.value);
+      fd.append('notes', feedbackNotes.value || '');
+      const resp = await fetch('/feedback/roi-example', { method: 'POST', body: fd });
+      if (!resp.ok) {
+        throw new Error('Feedback failed: ' + resp.status);
+      }
+      const data = await resp.json();
+      feedbackStatus.textContent = `Feedback saved: ${data.saved_dir || data.status}`;
+    } catch (err) {
+      feedbackStatus.textContent = String(err);
+    }
+  });
+</script>
+</body>
+</html>
+
