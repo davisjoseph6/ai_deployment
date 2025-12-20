@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "source": "roi-example",
+  "timestamp_utc": "20251212T032447Z",
+  "label": "bubble",
+  "notes": "",
+  "original_filename": "board_01_roi.jpg",
+  "saved_image": "feedback/20251212/board_01_roi_bubble_20251212T032447Z.png",
+  "image_size_hw": [
+    14,
+    27
+  ]
+}

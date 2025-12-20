@@ -2,141 +2,262 @@
 """
 yolo_service.py
 
-Local YOLO segmentation wrapper for Stage 1.
+YOLO segmentation service supporting:
+- local inference via Ultralytics (YOLO_MODE=local)
+- remote inference via HTTP (YOLO_MODE=remote)
 
-Loads a YOLO segmentation checkpoint and exposes predict() returning a
-normalized JSON bundle usable by the app pipeline.
+Key design goal:
+- In remote mode, this module MUST NOT require torch/ultralytics to be installed.
+  Heavy imports happen only inside LocalYoloSegService.
 """
 
-from typing import Any, Dict, List, Optional
+import io
 import os
+import time
+from typing import Any, Dict, List, Optional
 
+import requests
 from PIL import Image
-import torch
 
-from app.settings import YOLO_CHECKPOINT
+from app.settings import (
+    YOLO_CHECKPOINT,
+    YOLO_MODE,
+    YOLO_ENDPOINT,
+    YOLO_AUTH_HEADER,
+    YOLO_AUTH_PREFIX,
+    YOLO_AUTH_TOKEN,
+)
 
-try:
-    from ultralytics import YOLO
-except Exception:
-    YOLO = None
+
+def _auth_headers() -> Dict[str, str]:
+    """Build auth headers for remote inference, if configured."""
+    token = (YOLO_AUTH_TOKEN or "").strip()
+    if not token:
+        return {}
+    header = (YOLO_AUTH_HEADER or "Authorization").strip()
+    prefix = (YOLO_AUTH_PREFIX or "Bearer").strip()
+    return {header: f"{prefix} {token}".strip()}
 
 
-def _get_yolo_device() -> str:
+def _poly_to_python_list(poly) -> Optional[List[List[float]]]:
+    if poly is None:
+        return None
+    try:
+        pts = poly.tolist()
+        if not pts:
+            return None
+        return [[float(x), float(y)] for x, y in pts]
+    except Exception:
+        return None
+
+
+def _normalize_prediction(pred: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Decide which device string to pass to Ultralytics:
-
-    1) If YOLO_DEVICE or DEVICE is 'cpu' -> force CPU.
-       If 'cuda' -> try GPU, but validate capability.
-    2) Else, auto: if a *supported* CUDA GPU exists, use it; otherwise 'cpu'.
+    Enforce the contract expected by YoloPredictResponse.
+    If the remote endpoint already returns the exact contract, this is a no-op
+    (except it strips unexpected fields).
     """
-    env = os.getenv("YOLO_DEVICE") or os.getenv("DEVICE")
-    requested = None
-    if env:
-        env = env.strip().lower()
-        if env in ("cpu", "cuda", "cuda:0"):
-            requested = env
-            print(f"[YOLO] Device requested from env: {env}")
-        else:
-            print(f"[YOLO] Ignoring unsupported YOLO_DEVICE={env}, auto-selecting.")
+    model = pred.get("model") or {}
+    image_shape = pred.get("image_shape")
 
-    if requested == "cpu":
-        print("[YOLO] Forcing CPU because YOLO_DEVICE=cpu")
-        return "cpu"
+    dets_in = pred.get("detections") or []
+    dets_out: List[Dict[str, Any]] = []
 
-    if torch.cuda.is_available():
-        try:
-            name = torch.cuda.get_device_name(0)
-            major, minor = torch.cuda.get_device_capability(0)
-            print(f"[YOLO] Detected CUDA device {name} (sm_{major}{minor})")
+    for i, d in enumerate(dets_in):
+        if not isinstance(d, dict):
+            continue
+        bbox = d.get("bbox_xyxy")
+        if not (isinstance(bbox, list) and len(bbox) == 4):
+            # If bbox missing/invalid, skip to avoid response validation failure
+            continue
 
-            if major < 7:
-                print(
-                    f"[YOLO] WARNING: GPU sm_{major}{minor} is not supported by this "
-                    "PyTorch build. Using 'cpu' instead."
-                )
-                return "cpu"
+        poly = d.get("polygon")
+        if poly is not None and not isinstance(poly, list):
+            poly = None
 
-            if requested in ("cuda", "cuda:0") or requested is None:
-                print("[YOLO] Using 'cuda' for YOLO segmentation.")
-                return "cuda"
+        dets_out.append(
+            {
+                "id": int(d.get("id", i)),
+                "category": str(d.get("category", "")),
+                "class_id": int(d.get("class_id", 0)),
+                "score": float(d.get("score", 0.0)),
+                "bbox_xyxy": [float(x) for x in bbox],
+                "polygon": poly,
+            }
+        )
 
-        except Exception as e:
-            print(f"[YOLO] CUDA available but capability query failed ({e}); using 'cpu'.")
+    out = {
+        "model": {
+            "name": str(model.get("name", "yolo-seg")),
+            "version": str(model.get("version", "remote")),
+        },
+        "image_shape": image_shape if isinstance(image_shape, list) else [0, 0],
+        "detections": dets_out,
+        "timing_ms": pred.get("timing_ms", None),
+    }
+    return out
 
-    print("[YOLO] Using 'cpu'.")
-    return "cpu"
 
-class YoloSegService:
-    """Thin wrapper around a YOLO segmentation model."""
+class LocalYoloSegService:
+    """Local Ultralytics YOLO segmentation wrapper (requires torch + ultralytics)."""
 
-    def __init__(self, checkpoint: str = None, device: Optional[str] = None):
-        if YOLO is None:
-            raise ImportError(
-                "ultralytics is required. Install with: pip install ultralytics"
-            )
+    def __init__(self, checkpoint: Optional[str] = None, device: Optional[str] = None):
+        # Heavy imports only here
+        import torch
+        from ultralytics import YOLO  # type: ignore
 
         ckpt = checkpoint or str(YOLO_CHECKPOINT)
-        self.device = device or _get_yolo_device()
+        if not os.path.exists(ckpt):
+            raise FileNotFoundError(f"YOLO checkpoint not found: {ckpt}")
 
-        print(f"[YOLO] Loading model from: {ckpt}")
+        self.device = device or self._get_yolo_device(torch)
         self.model = YOLO(ckpt)
-        # Ultralytics will honor device argument in predict(); this is extra safety:
+
         try:
             self.model.to(self.device)
-        except Exception as e:
-            print(f"[YOLO] Warning: model.to({self.device}) failed: {e}")
+        except Exception:
+            pass
 
-        # class names mapping if available
         self.names = getattr(self.model, "names", {})
 
+    @staticmethod
+    def _get_yolo_device(torch_mod) -> str:
+        """
+        Decide which device to pass to Ultralytics.
+
+        - If YOLO_DEVICE/DEVICE=cpu => cpu
+        - Else CUDA only if available AND compute capability >= 7.0
+        - Otherwise cpu
+        """
+        env = (os.getenv("YOLO_DEVICE") or os.getenv("DEVICE") or "").strip().lower()
+        if env == "cpu":
+            os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
+            return "cpu"
+
+        if getattr(torch_mod, "cuda", None) is not None and torch_mod.cuda.is_available():
+            try:
+                major, minor = torch_mod.cuda.get_device_capability(0)
+                if major < 7:
+                    return "cpu"
+                return "cuda"
+            except Exception:
+                return "cpu"
+
+        return "cpu"
+
+    def _name_for_class(self, cls_id: int) -> str:
+        try:
+            if hasattr(self.names, "get"):
+                return str(self.names.get(cls_id, str(cls_id)))
+        except Exception:
+            pass
+        return str(cls_id)
+
     def predict(self, image: Image.Image, conf: float = 0.25) -> Dict[str, Any]:
-        """Run inference and return a normalized JSON structure."""
+        t0 = time.perf_counter()
         img = image.convert("RGB")
 
-        results = self.model.predict(
-            img, conf=conf, device=self.device, verbose=False
-        )
-        r = results[0]
+        results = self.model.predict(img, conf=conf, device=self.device, verbose=False)
 
+        if not results:
+            return {
+                "model": {"name": "yolo-seg", "version": os.path.basename(str(YOLO_CHECKPOINT))},
+                "image_shape": [img.height, img.width],
+                "detections": [],
+                "timing_ms": (time.perf_counter() - t0) * 1000.0,
+            }
+
+        r = results[0]
         boxes = getattr(r, "boxes", None)
         masks = getattr(r, "masks", None)
 
-        detections: List[Dict[str, Any]] = []
-
-        if boxes is None:
+        if boxes is None or getattr(boxes, "xyxy", None) is None:
             return {
-                "model": {"name": "yolo-seg", "version": YOLO_CHECKPOINT.name},
+                "model": {"name": "yolo-seg", "version": os.path.basename(str(YOLO_CHECKPOINT))},
                 "image_shape": [img.height, img.width],
                 "detections": [],
+                "timing_ms": (time.perf_counter() - t0) * 1000.0,
             }
 
         xyxy = boxes.xyxy.cpu().numpy()
         scores = boxes.conf.cpu().numpy()
         clses = boxes.cls.cpu().numpy().astype(int)
 
-        # Polygons, if available (Ultralytics provides masks.xy)
-        polygons = []
-        if masks is not None and hasattr(masks, "xy"):
-            polygons = masks.xy
-        else:
-            polygons = [None] * len(xyxy)
+        polygons: List[Optional[List[List[float]]]] = [None] * len(xyxy)
+        if masks is not None and hasattr(masks, "xy") and masks.xy is not None:
+            raw = masks.xy
+            for i in range(min(len(raw), len(polygons))):
+                polygons[i] = _poly_to_python_list(raw[i])
 
+        detections: List[Dict[str, Any]] = []
         for i in range(len(xyxy)):
             cls_id = int(clses[i])
-            category = self.names.get(cls_id, str(cls_id))
-            detections.append({
-                "id": i,
-                "category": category,
-                "class_id": cls_id,
-                "score": float(scores[i]),
-                "bbox_xyxy": [float(x) for x in xyxy[i].tolist()],
-                "polygon": polygons[i] if polygons[i] is not None else None,
-            })
+            detections.append(
+                {
+                    "id": i,
+                    "category": self._name_for_class(cls_id),
+                    "class_id": cls_id,
+                    "score": float(scores[i]),
+                    "bbox_xyxy": [float(x) for x in xyxy[i].tolist()],
+                    "polygon": polygons[i],
+                }
+            )
 
         return {
-            "model": {"name": "yolo-seg", "version": YOLO_CHECKPOINT.name},
+            "model": {"name": "yolo-seg", "version": os.path.basename(str(YOLO_CHECKPOINT))},
             "image_shape": [img.height, img.width],
             "detections": detections,
+            "timing_ms": (time.perf_counter() - t0) * 1000.0,
         }
+
+
+class RemoteYoloSegService:
+    """
+    Calls a remote inference endpoint.
+    Recommended: have MLOps expose the SAME contract as /yolo/predict returns,
+    so the app stays stable.
+    """
+
+    def __init__(self, endpoint: str, timeout: tuple = (10.0, 600.0)):
+        ep = endpoint.strip().rstrip("/")
+        if not ep:
+            raise ValueError("YOLO_ENDPOINT is empty but YOLO_MODE=remote.")
+        self.device = "remote"
+        self.timeout = timeout
+
+        # Accept either base URL or full route
+        if ep.endswith("/yolo/predict") or ep.endswith("/score"):
+            self.predict_url = ep
+        else:
+            self.predict_url = ep + "/yolo/predict"
+
+        self.headers = _auth_headers()
+
+    def predict(self, image: Image.Image, conf: float = 0.25) -> Dict[str, Any]:
+        img = image.convert("RGB")
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        payload = buf.getvalue()
+
+        files = {"file": ("image.png", payload, "image/png")}
+        resp = requests.post(
+            self.predict_url,
+            params={"conf": conf},
+            files=files,
+            headers=self.headers,
+            timeout=self.timeout,
+        )
+        if not resp.ok:
+            raise RuntimeError(f"Remote YOLO failed: HTTP {resp.status} {resp.text[:500]}")
+
+        data = resp.json()
+        return _normalize_prediction(data)
+
+
+def build_yolo_service():
+    """Factory: returns local or remote YOLO service based on settings/env."""
+    mode = (YOLO_MODE or "local").strip().lower()
+    if mode == "remote":
+        return RemoteYoloSegService(YOLO_ENDPOINT)
+    return LocalYoloSegService()
 

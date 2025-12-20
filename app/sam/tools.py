@@ -1,5 +1,18 @@
-import os
-import sys
+#!/usr/bin/env python3
+"""
+tools.py
+
+Utilities used by the MobileSAM pipeline:
+- mask filtering & bbox helpers
+- overlay rendering helpers
+- segment stats utilities
+- conversion helpers (mask -> polygon)
+
+Stage 1 local usage.
+"""
+
+from typing import List
+
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
@@ -87,6 +100,7 @@ def get_bbox_from_mask(mask):
 
 # === COLOR + PIXEL ANALYSIS UTILITIES ===
 
+
 def _name_color_from_hsv(h, s, v):
     """Rough mapping of mean HSV values to a coarse color class."""
     if v < 40:
@@ -136,13 +150,15 @@ def compute_segment_stats(annotations, image_rgb):
         s_mean = int(np.round(s_vals.mean()))
         v_mean = int(np.round(v_vals.mean()))
         color_class = _name_color_from_hsv(h_mean, s_mean, v_mean)
-        stats.append({
-            "id": i,
-            "pixels": pixels,
-            "bbox_xywh": ann.get("bbox", None),  # SAM gives [x,y,w,h]
-            "color_class": color_class,
-            "mean_hsv": [h_mean, s_mean, v_mean],
-        })
+        stats.append(
+            {
+                "id": i,
+                "pixels": pixels,
+                "bbox_xywh": ann.get("bbox", None),  # SAM gives [x,y,w,h]
+                "color_class": color_class,
+                "mean_hsv": [h_mean, s_mean, v_mean],
+            }
+        )
     return stats
 
 
@@ -160,8 +176,10 @@ def compute_segment_stats_in_bbox(annotations, image_rgb, bbox_xywh, min_pixels=
     if bbox_xywh is None:
         return []
     x, y, w, h = bbox_xywh
-    x1 = max(0, int(round(x))); y1 = max(0, int(round(y)))
-    x2 = min(W, int(round(x + w))); y2 = min(H, int(round(y + h)))
+    x1 = max(0, int(round(x)))
+    y1 = max(0, int(round(y)))
+    x2 = min(W, int(round(x + w)))
+    y2 = min(H, int(round(y + h)))
     if x1 >= x2 or y1 >= y2:
         return []
 
@@ -185,13 +203,15 @@ def compute_segment_stats_in_bbox(annotations, image_rgb, bbox_xywh, min_pixels=
         v_mean = int(np.round(v_vals.mean()))
         color_class = _name_color_from_hsv(h_mean, s_mean, v_mean)
 
-        stats.append({
-            "id": i,
-            "pixels": pixels,
-            "bbox_xywh": ann.get("bbox", None),
-            "color_class": color_class,
-            "mean_hsv": [h_mean, s_mean, v_mean],
-        })
+        stats.append(
+            {
+                "id": i,
+                "pixels": pixels,
+                "bbox_xywh": ann.get("bbox", None),
+                "color_class": color_class,
+                "mean_hsv": [h_mean, s_mean, v_mean],
+            }
+        )
     return stats
 
 
@@ -214,8 +234,10 @@ def compute_segment_stats_in_bboxes(annotations, image_rgb, bboxes_xywh, min_pix
         if bbox is None:
             continue
         x, y, w, h = bbox
-        x1 = max(0, int(round(x))); y1 = max(0, int(round(y)))
-        x2 = min(W, int(round(x + w))); y2 = min(H, int(round(y + h)))
+        x1 = max(0, int(round(x)))
+        y1 = max(0, int(round(y)))
+        x2 = min(W, int(round(x + w)))
+        y2 = min(H, int(round(y + h)))
         if x1 < x2 and y1 < y2:
             roi[y1:y2, x1:x2] = True
 
@@ -237,13 +259,15 @@ def compute_segment_stats_in_bboxes(annotations, image_rgb, bboxes_xywh, min_pix
         s_mean = int(np.round(s_vals.mean()))
         v_mean = int(np.round(v_vals.mean()))
         color_class = _name_color_from_hsv(h_mean, s_mean, v_mean)
-        stats.append({
-            "id": i,
-            "pixels": pixels,
-            "bbox_xywh": ann.get("bbox", None),
-            "color_class": color_class,
-            "mean_hsv": [h_mean, s_mean, v_mean],
-        })
+        stats.append(
+            {
+                "id": i,
+                "pixels": pixels,
+                "bbox_xywh": ann.get("bbox", None),
+                "color_class": color_class,
+                "mean_hsv": [h_mean, s_mean, v_mean],
+            }
+        )
     return stats
 
 
@@ -279,6 +303,7 @@ def draw_segment_labels_pil(image, annotations, stats, font_size=14):
 
 # === FAST SHOW / MASK OVERLAYS ===
 
+
 def fast_process(
     annotations,
     image,
@@ -300,24 +325,36 @@ def fast_process(
         if isinstance(annotations[0], torch.Tensor):
             annotations = np.array(annotations.cpu())
         for i, mask in enumerate(annotations):
-            mask = cv2.morphologyEx(mask.astype(np.uint8),
-                                    cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
-            annotations[i] = cv2.morphologyEx(mask.astype(np.uint8),
-                                              cv2.MORPH_OPEN, np.ones((8, 8), np.uint8))
+            mask = cv2.morphologyEx(
+                mask.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8)
+            )
+            annotations[i] = cv2.morphologyEx(
+                mask.astype(np.uint8), cv2.MORPH_OPEN, np.ones((8, 8), np.uint8)
+            )
 
     if device == "cpu":
         annotations = np.array(annotations)
         inner_mask = fast_show_mask(
-            annotations, plt.gca(), random_color=mask_random_color,
-            bbox=bbox, retinamask=use_retina,
-            target_height=original_h, target_width=original_w)
+            annotations,
+            plt.gca(),
+            random_color=mask_random_color,
+            bbox=bbox,
+            retinamask=use_retina,
+            target_height=original_h,
+            target_width=original_w,
+        )
     else:
         if isinstance(annotations[0], np.ndarray):
             annotations = torch.from_numpy(np.array(annotations))
         inner_mask = fast_show_mask_gpu(
-            annotations, plt.gca(), random_color=mask_random_color,
-            bbox=bbox, retinamask=use_retina,
-            target_height=original_h, target_width=original_w)
+            annotations,
+            plt.gca(),
+            random_color=mask_random_color,
+            bbox=bbox,
+            retinamask=use_retina,
+            target_height=original_h,
+            target_width=original_w,
+        )
 
     if isinstance(annotations, torch.Tensor):
         annotations = annotations.cpu().numpy()
@@ -328,9 +365,14 @@ def fast_process(
         for mask in annotations:
             annotation = mask.astype(np.uint8)
             if not use_retina:
-                annotation = cv2.resize(annotation, (original_w, original_h),
-                                        interpolation=cv2.INTER_NEAREST)
-            contours, _ = cv2.findContours(annotation, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+                annotation = cv2.resize(
+                    annotation,
+                    (original_w, original_h),
+                    interpolation=cv2.INTER_NEAREST,
+                )
+            contours, _ = cv2.findContours(
+                annotation, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE
+            )
             contour_all.extend(contours)
         thickness = max(1, int(2 // max(1, scale)))
         cv2.drawContours(temp, contour_all, -1, (255, 255, 255), thickness)
@@ -348,8 +390,15 @@ def fast_process(
     return image
 
 
-def fast_show_mask(annotation, ax, random_color=False, bbox=None,
-                   retinamask=True, target_height=960, target_width=960):
+def fast_show_mask(
+    annotation,
+    ax,
+    random_color=False,
+    bbox=None,
+    retinamask=True,
+    target_height=960,
+    target_width=960,
+):
     mask_sum = annotation.shape[0]
     height, weight = annotation.shape[1:3]
     areas = np.sum(annotation, axis=(1, 2))
@@ -357,28 +406,50 @@ def fast_show_mask(annotation, ax, random_color=False, bbox=None,
     annotation = annotation[sorted_indices]
     index = (annotation != 0).argmax(axis=0)
 
-    color = np.random.random((mask_sum, 1, 1, 3)) if random_color else np.ones(
-        (mask_sum, 1, 1, 3)) * np.array([30 / 255, 144 / 255, 255 / 255])
+    color = (
+        np.random.random((mask_sum, 1, 1, 3))
+        if random_color
+        else np.ones((mask_sum, 1, 1, 3)) * np.array([30 / 255, 144 / 255, 255 / 255])
+    )
     transparency = np.ones((mask_sum, 1, 1, 1)) * 0.6
     visual = np.concatenate([color, transparency], axis=-1)
     mask_image = np.expand_dims(annotation, -1) * visual
 
     mask = np.zeros((height, weight, 4))
-    h_indices, w_indices = np.meshgrid(np.arange(height), np.arange(weight), indexing="ij")
+    h_indices, w_indices = np.meshgrid(
+        np.arange(height), np.arange(weight), indexing="ij"
+    )
     indices = (index[h_indices, w_indices], h_indices, w_indices, slice(None))
     mask[h_indices, w_indices, :] = mask_image[indices]
 
     if bbox is not None:
         x1, y1, x2, y2 = bbox
-        ax.add_patch(plt.Rectangle((x1, y1), x2 - x1, y2 - y1,
-                                   fill=False, edgecolor="b", linewidth=1))
+        ax.add_patch(
+            plt.Rectangle(
+                (x1, y1),
+                x2 - x1,
+                y2 - y1,
+                fill=False,
+                edgecolor="b",
+                linewidth=1,
+            )
+        )
     if not retinamask:
-        mask = cv2.resize(mask, (target_width, target_height), interpolation=cv2.INTER_NEAREST)
+        mask = cv2.resize(
+            mask, (target_width, target_height), interpolation=cv2.INTER_NEAREST
+        )
     return mask
 
 
-def fast_show_mask_gpu(annotation, ax, random_color=False, bbox=None,
-                       retinamask=True, target_height=960, target_width=960):
+def fast_show_mask_gpu(
+    annotation,
+    ax,
+    random_color=False,
+    bbox=None,
+    retinamask=True,
+    target_height=960,
+    target_width=960,
+):
     device = annotation.device
     mask_sum, height, weight = annotation.shape
     areas = torch.sum(annotation, dim=(1, 2))
@@ -386,15 +457,20 @@ def fast_show_mask_gpu(annotation, ax, random_color=False, bbox=None,
     annotation = annotation[sorted_indices]
     index = (annotation != 0).to(torch.long).argmax(dim=0)
 
-    color = torch.rand((mask_sum, 1, 1, 3), device=device) if random_color else \
-        torch.ones((mask_sum, 1, 1, 3), device=device) * torch.tensor(
-            [30 / 255, 144 / 255, 255 / 255], device=device)
+    color = (
+        torch.rand((mask_sum, 1, 1, 3), device=device)
+        if random_color
+        else torch.ones((mask_sum, 1, 1, 3), device=device)
+        * torch.tensor([30 / 255, 144 / 255, 255 / 255], device=device)
+    )
     transparency = torch.ones((mask_sum, 1, 1, 1), device=device) * 0.6
     visual = torch.cat([color, transparency], dim=-1)
     mask_image = torch.unsqueeze(annotation, -1) * visual
 
     h_indices, w_indices = torch.meshgrid(
-        torch.arange(height, device=device), torch.arange(weight, device=device), indexing="ij"
+        torch.arange(height, device=device),
+        torch.arange(weight, device=device),
+        indexing="ij",
     )
     index = index.to(device)
     mask = torch.zeros((height, weight, 4), device=device)
@@ -404,10 +480,43 @@ def fast_show_mask_gpu(annotation, ax, random_color=False, bbox=None,
     mask_cpu = mask.cpu().numpy()
     if bbox is not None:
         x1, y1, x2, y2 = bbox
-        ax.add_patch(plt.Rectangle((x1, y1), x2 - x1, y2 - y1,
-                                   fill=False, edgecolor="b", linewidth=1))
+        ax.add_patch(
+            plt.Rectangle(
+                (x1, y1),
+                x2 - x1,
+                y2 - y1,
+                fill=False,
+                edgecolor="b",
+                linewidth=1,
+            )
+        )
     if not retinamask:
-        mask_cpu = cv2.resize(mask_cpu, (target_width, target_height),
-                              interpolation=cv2.INTER_NEAREST)
+        mask_cpu = cv2.resize(
+            mask_cpu, (target_width, target_height), interpolation=cv2.INTER_NEAREST
+        )
     return mask_cpu
+
+
+def mask_to_polygon(mask: np.ndarray, epsilon_ratio: float = 0.002) -> List[List[float]]:
+    """
+    Convert a binary mask (H,W) into a polygon (largest contour).
+    Returns: [[x,y], ...] in pixel coordinates.
+    """
+    if mask is None:
+        return []
+
+    m = (mask.astype(np.uint8) * 255)
+    contours, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return []
+
+    c = max(contours, key=cv2.contourArea)
+    peri = cv2.arcLength(c, True)
+    eps = max(1.0, float(epsilon_ratio) * float(peri))
+    approx = cv2.approxPolyDP(c, eps, True)
+
+    pts = approx.reshape(-1, 2)
+    if pts.shape[0] < 3:
+        return []
+    return [[float(x), float(y)] for x, y in pts]
 

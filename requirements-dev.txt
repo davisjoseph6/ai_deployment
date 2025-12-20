@@ -1,0 +1,12 @@
+-r requirements-prod.txt
+
+# local inference only
+torch
+torchvision
+timm
+ultralytics
+git+https://github.com/dhkim2810/MobileSAM.git
+matplotlib
+
+pytest>=7.4.4
+

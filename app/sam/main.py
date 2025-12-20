@@ -1,20 +1,30 @@
+#!/usr/bin/env python3
+"""
+main.py
+
+MobileSAM core pipeline (Stage 1):
+- automatic segmentation overlays + stats
+- ROI "large-like-0" stats logic for batch processing
+- prompted refinement using SamPredictor (box prompt + optional points)
+"""
+
 import os
 import csv
 import pathlib
 import json
+from typing import Iterable, List, Dict, Any, Optional
+
 import numpy as np
 import torch
-from typing import Iterable, List, Dict
+from PIL import Image
 
 from app.settings import SAM_CHECKPOINT
 from mobile_sam import SamAutomaticMaskGenerator, SamPredictor, sam_model_registry
-from PIL import Image
 
 from .tools import (
     fast_process,
     compute_segment_stats,
     draw_segment_labels_pil,
-    compute_segment_stats_in_bbox,
     compute_segment_stats_in_bboxes,
     get_bbox_from_mask,
 )
@@ -30,14 +40,13 @@ BOX0_AREA_RATIO = 0.75  # include bboxes with area >= 75% of box-0 area
 
 
 # --------- Device & model setup ----------
-
 def _get_device() -> torch.device:
     """
-    Decide which device to use in a predictable, robust way:
+    Decide which device to use:
 
     1) If SAM_DEVICE or DEVICE env is 'cpu' -> force CPU.
        If 'cuda' -> try GPU, but validate capability.
-    2) Else, auto: if a *supported* CUDA GPU exists, use it; otherwise CPU.
+    2) Else auto: if a supported CUDA GPU exists, use it; otherwise CPU.
     """
     env = os.getenv("SAM_DEVICE") or os.getenv("DEVICE")
     requested = None
@@ -47,22 +56,18 @@ def _get_device() -> torch.device:
             requested = env
             print(f"[MobileSAM] Device requested from env: {env}")
         else:
-            print(f"[MobileSAM] Ignoring unsupported SAM_DEVICE={env}, auto-selecting device.")
+            print("[MobileSAM] Ignoring unsupported SAM_DEVICE, auto-selecting device.")
 
-    # If user explicitly forced CPU, respect it.
     if requested == "cpu":
         print("[MobileSAM] Forcing CPU because SAM_DEVICE=cpu")
         return torch.device("cpu")
 
-    # Try CUDA if available
     if torch.cuda.is_available():
         try:
             name = torch.cuda.get_device_name(0)
             major, minor = torch.cuda.get_device_capability(0)
             print(f"[MobileSAM] Detected CUDA device {name} (sm_{major}{minor})")
 
-            # IMPORTANT: your current PyTorch build only supports sm_70+.
-            # MX250 is sm_61 -> not supported -> we must fall back to CPU.
             if major < 7:
                 print(
                     f"[MobileSAM] WARNING: GPU sm_{major}{minor} is not supported "
@@ -70,22 +75,22 @@ def _get_device() -> torch.device:
                 )
                 return torch.device("cpu")
 
-            # GPU is supported → use it if requested or default
             if requested in ("cuda", "cuda:0") or requested is None:
                 print("[MobileSAM] Using CUDA for MobileSAM.")
                 return torch.device("cuda")
 
         except Exception as e:
-            print(f"[MobileSAM] CUDA available but capability query failed ({e}); falling back to CPU.")
+            print(
+                f"[MobileSAM] CUDA available but capability query failed ({e}); "
+                "falling back to CPU."
+            )
 
-    # Default: CPU
     print("[MobileSAM] Using CPU.")
     return torch.device("cpu")
 
-# Single source-of-truth for SAM device
+
 device: torch.device = _get_device()
 
-# Create and place model on that device
 sam_checkpoint = str(SAM_CHECKPOINT)
 model_type = "vit_t"
 
@@ -94,9 +99,9 @@ mobile_sam = sam_model_registry[model_type](checkpoint=sam_checkpoint)
 mobile_sam.to(device=device)
 mobile_sam.eval()
 
-# Generators (use the same underlying model and device)
 mask_generator = SamAutomaticMaskGenerator(mobile_sam)
-predictor = SamPredictor(mobile_sam)  # reserved for future prompt usage
+predictor = SamPredictor(mobile_sam)
+
 
 def _is_image_file(p: pathlib.Path) -> bool:
     return p.suffix.lower() in ACCEPT_EXT
@@ -104,6 +109,59 @@ def _is_image_file(p: pathlib.Path) -> bool:
 
 def _ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
+
+
+@torch.no_grad()
+def refine_mask_with_box_prompt(
+    image: Image.Image,
+    bbox_xyxy: List[float],
+    point_coords: Optional[List[List[float]]] = None,
+    point_labels: Optional[List[int]] = None,
+) -> Dict[str, Any]:
+    """
+    Refine segmentation using SAM predictor with a box prompt (+ optional points).
+
+    bbox_xyxy: [x1,y1,x2,y2] in pixel coords (float ok).
+    point_coords: optional [[x,y], ...] in pixel coords.
+    point_labels: optional [1/0,...] (1=foreground, 0=background).
+    """
+    img = image.convert("RGB")
+    img_np = np.array(img)
+
+    H, W = img_np.shape[:2]
+    x1, y1, x2, y2 = bbox_xyxy
+
+    x1 = float(np.clip(x1, 0, W - 1))
+    y1 = float(np.clip(y1, 0, H - 1))
+    x2 = float(np.clip(x2, 0, W - 1))
+    y2 = float(np.clip(y2, 0, H - 1))
+
+    box = np.array([x1, y1, x2, y2], dtype=np.float32)
+
+    predictor.set_image(img_np)
+
+    pc = None
+    pl = None
+    if point_coords:
+        pc = np.array(point_coords, dtype=np.float32)
+        if point_labels is None:
+            pl = np.ones((len(point_coords),), dtype=np.int32)
+        else:
+            pl = np.array(point_labels, dtype=np.int32)
+
+    masks, scores, _ = predictor.predict(
+        point_coords=pc,
+        point_labels=pl,
+        box=box,
+        multimask_output=True,
+    )
+
+    if masks is None or len(masks) == 0:
+        return {"mask": np.zeros((H, W), dtype=np.uint8), "score": 0.0}
+
+    best = int(np.argmax(scores))
+    mask = masks[best].astype(np.uint8)
+    return {"mask": mask, "score": float(scores[best])}
 
 
 @torch.no_grad()
@@ -116,7 +174,6 @@ def segment_everything(
     mask_random_color=True,
 ):
     """Original segmentation function returning only the image."""
-    global mask_generator
     input_size = int(input_size)
     w, h = image.size
     scale = input_size / max(w, h)
@@ -151,7 +208,6 @@ def analyze_segments(
     mask_random_color=True,
 ):
     """Return (overlay image with labels, per-segment stats) – counts over full masks."""
-    global mask_generator
     input_size = int(input_size)
     w, h = image.size
     scale = input_size / max(w, h)
@@ -179,10 +235,12 @@ def analyze_segments(
     return overlay, stats
 
 
-def _collect_large_like_box0_bboxes(annotations, ratio: float = BOX0_AREA_RATIO) -> List[List[int]]:
+def _collect_large_like_box0_bboxes(
+    annotations, ratio: float = BOX0_AREA_RATIO
+) -> List[List[int]]:
     """
     From SAM annotations, pick every bbox whose area >= ratio * area(box-0).
-    Returns a list of [x,y,w,h] (at least the box-0 bbox).
+    Returns list of [x,y,w,h] (at least the box-0 bbox).
     """
     if not annotations:
         return []
@@ -216,13 +274,12 @@ def analyze_segments_in_bbox0(
     mask_random_color=True,
 ):
     """
-    NEW behavior:
+    Behavior:
     - Identify all bboxes whose area >= 75% of box-0's bbox area.
-    - Build the ROI as the UNION of these bboxes.
+    - Build ROI as UNION of those bboxes.
     - Compute stats ONLY for pixels inside that ROI.
-    - Draw labels only for segments that have >=1 pixel inside the ROI.
+    - Draw labels only for segments that have >=1 pixel inside ROI.
     """
-    global mask_generator
     input_size = int(input_size)
     w, h = image.size
     scale = input_size / max(w, h)
@@ -236,13 +293,11 @@ def analyze_segments_in_bbox0(
     if not annotations:
         return image_resized, []
 
-    # gather "large-like-0" bboxes (>= 75% of box0 area)
     large_bboxes = _collect_large_like_box0_bboxes(annotations, BOX0_AREA_RATIO)
+    stats = compute_segment_stats_in_bboxes(
+        annotations, image_resized, large_bboxes, min_pixels=1
+    )
 
-    # stats only inside the union of those bboxes
-    stats = compute_segment_stats_in_bboxes(annotations, image_resized, large_bboxes, min_pixels=1)
-
-    # overlay (labels only for ids present in stats)
     overlay = fast_process(
         annotations=annotations,
         image=image_resized,
@@ -280,7 +335,7 @@ def batch_process_resources(
 ) -> Dict[str, List[Dict]]:
     """
     Process images under resources/<subset> and save to generated/<subset>.
-    If inside_bbox0=True, applies the new 'large-like-0' ROI rule described above.
+    If inside_bbox0=True, applies 'large-like-0' ROI rule.
     """
     manifest: Dict[str, List[Dict]] = {}
     for subset in subsets:
@@ -317,18 +372,23 @@ def batch_process_resources(
             _save_stats_csv(stats, csv_path)
             _save_stats_json(stats, json_path)
 
-            items.append({
-                "input": str(p),
-                "overlay": overlay_path,
-                "csv": csv_path,
-                "json": json_path,
-            })
+            items.append(
+                {
+                    "input": str(p),
+                    "overlay": overlay_path,
+                    "csv": csv_path,
+                    "json": json_path,
+                }
+            )
         manifest[subset] = items
     return manifest
+
 
 def get_sam_device() -> str:
     """Return the current device used by MobileSAM (for /healthz)."""
     return str(device)
+
+
 if __name__ == "__main__":
     _ensure_dir(GENERATED_DIR)
     result = batch_process_resources(subsets=SUBSETS, inside_bbox0=True)

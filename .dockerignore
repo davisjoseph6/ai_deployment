@@ -1,0 +1,10 @@
+.venv
+__pycache__
+*.pyc
+tests
+test_images
+ai_model_artifacts
+feedback
+.git
+.gitignore
+

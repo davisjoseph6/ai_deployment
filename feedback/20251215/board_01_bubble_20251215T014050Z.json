@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "source": "roi-example",
+  "timestamp_utc": "20251215T014050Z",
+  "label": "bubble",
+  "notes": "test feedback from scripts/test_endpoints.py",
+  "original_filename": "board_01.jpg",
+  "saved_image": "feedback/20251215/board_01_bubble_20251215T014050Z.png",
+  "image_size_hw": [
+    640,
+    640
+  ]
+}
